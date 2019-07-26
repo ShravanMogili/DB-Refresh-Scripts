@@ -1,0 +1,249 @@
+Check owners, collations and backups
+
+http://www.sqlservercentral.com/scripts/Administration/61343/
+
+ This script is a quick one to check some common server problems that may end up being annoying
+
+The script checks the following :-
+
+-- owners that don't exist any longer
+-- databases on old compatibility levels
+-- databases that haven't been backed up in the last week
+-- full recovery databases with no transaction log backups in last 7 days
+-- databases with different collations from server
+-- databases with different collations of columns within
+-- databases with column collations different from database collation
+
+this procedure has been tested on sql server 2000 sp4 and SQL Server 2005 sp2
+
+any problems email pgr_consulting @ yahoo.com
+
+run as follows :-
+
+exec sp_common_server_problems
+go 
+
+
+
+USE [master]
+GO
+/****** Object: StoredProcedure [dbo].[sp_common_server_problems] Script Date: 07/13/2007 15:59:06 ******/
+IF EXISTS (SELECT * FROM sysobjects WHERE object_id = OBJECT_ID(N'[dbo].[sp_common_server_problems]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[sp_common_server_problems]
+go
+
+/****** Object: StoredProcedure [dbo].[sp_common_server_problems] Script Date: 07/13/2007 15:58:51 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create procedure [dbo].[sp_common_server_problems]
+as
+-- owners that don't exist any longer
+-- databases on old compatibility levels
+-- databases that haven't been backed up in the last week
+-- full recovery databases with no transaction log backups in last 7 days
+-- databases with different collations from server
+-- databases with different collations of columns within
+-- databases with column collations different from database collation
+
+set nocount on
+declare @msg varchar(2000), @server_compatibility_level int, @master_collation varchar(255)
+
+-- check whether database owners are valid
+select name into #check_database_owners
+from master.dbo.sysdatabases
+where isnull(suser_sname(sid),'no_owner') = 'no_owner'
+
+if @@rowcount=0
+begin
+ select 'all databases have valid owners' as 'database ownership check'
+end
+else
+begin
+ select 'the ' + name + ' database has an invalid owner' as 'database ownership check'
+ from #check_database_owners
+ order by name
+end
+
+-- check for previous compatibility levels
+create table #versioninfo (????
+????[Index] varchar(5), 
+????[Name] varchar(20), 
+????Internal_Value varchar(10), 
+????Character_Value varchar(120)) 
+
+insert into #versioninfo exec ('xp_msver')
+select @server_compatibility_level=cast(substring(Character_Value,1,1)+'0' as int) 
+from #versioninfo where Name = 'ProductVersion'
+
+select name, cmptlevel into #check_database_compatibilty
+from master.dbo.sysdatabases
+where cmptlevel < @server_compatibility_level
+
+if @@rowcount=0
+begin
+ select 'all databases have current compatibility levels' as 'compatibility levels check'
+end
+else
+begin
+ select 'the ' + name + ' database has an older compatibility level, ' 
+ + cast(cmptlevel as varchar(3)) as 'compatibility levels check'
+ from #check_database_compatibilty
+ order by name
+end
+
+create table #full_database_backups (dbid int identity(1,1), dbname varchar(50))
+
+insert into #full_database_backups
+select name
+from sysdatabases where name not in ('tempdb')
+
+select 'the ' + dbname + ' database has not had a full backup in the last 7 days' as 'full backups check'
+from #full_database_backups where dbname not in 
+(select database_name from msdb..backupset 
+where type = 'D' 
+and backup_start_date > dateadd(day,-7,getdate()))
+order by dbname
+
+drop table #full_database_backups
+
+create table #full_recovery_databases (dbid int identity(1,1), dbname varchar(50))
+
+insert into #full_recovery_databases
+select name
+from sysdatabases
+where convert(varchar(50),DatabasePropertyEx(name,'Recovery'))= 'FULL'
+
+select 'the ' + dbname + ' database is set to Full recovery but has not had a Log backup in last 7 days' 
+as 'Full recovery mode and Log Backups check'
+from #full_recovery_databases where dbname not in 
+(select database_name from msdb..backupset 
+where type = 'L' 
+and backup_start_date > dateadd(day,-7,getdate()))
+order by dbname
+
+drop table #full_recovery_databases
+
+SELECT @master_collation=convert(sysname,DatabasePropertyEx('master','Collation'))
+
+SELECT 'the ' + name + ' database has a different collation from master, ' + 
+convert(sysname,DatabasePropertyEx(name,'Collation')) + ' (master=' + @master_collation+')' 
+as 'server/database collation check'
+into #temp_collations
+from sysdatabases
+where convert(sysname,DatabasePropertyEx('master','Collation')) <>
+convert(sysname,DatabasePropertyEx(name,'Collation'))
+order by name
+
+if @@rowcount = 0
+begin
+ select 'there are no databases that have a different collation from master' 
+ as 'server/database collation check'
+end
+else
+begin
+ select * from #temp_collations
+end
+
+set nocount on
+
+create table #databases (dbid int identity(1,1), dbname varchar(100), collation varchar(100))
+create table #database_collations (dbname varchar(100), collation varchar(100))
+create table #database_collations_by_column (dbname varchar(100), colname varchar(100), collation varchar(100))
+
+declare @number_of_dbs int, @counter int, @sql varchar(8000), @dbname varchar(100)
+
+insert into #databases
+select name, convert(sysname,DatabasePropertyEx(name,'Collation')) as collation
+from master..sysdatabases
+where name not in ('irf9999_IAS')
+order by name
+
+select @number_of_dbs = count(*) from #databases
+select @counter=1
+
+while @counter <= @number_of_dbs
+begin
+
+????select @dbname = dbname from #databases where dbid=@counter
+
+????select @sql= 'insert into #database_collations select ''' + @dbname + ''' as dbname, sc.collation from ' +
+ @dbname + '..syscolumns sc, ' + @dbname + '..sysobjects so, ' + @dbname + '..systypes st
+????where so.id=sc.id
+????and so.type=''U''
+????and st.xtype=sc.xtype
+????and sc.xtype in (select xtype from systypes
+????where name in (''char'',''nchar'',''nvarchar'',''varchar''))
+????and so.name not like ''dt%''
+????group by sc.collation'
+ 
+????exec (@sql)
+
+????select @sql= ' insert into #database_collations_by_column select ''' + @dbname + 
+ ''' as dbname, sc.name , sc.collation '+ 
+ ' from ' +
+ @dbname + '..syscolumns sc, ' + @dbname + '..sysobjects so, ' + @dbname + '..systypes st
+????where so.id=sc.id
+????and so.type=''U''
+????and st.xtype=sc.xtype
+????and sc.xtype in (select xtype from systypes
+????where name in (''char'',''nchar'',''nvarchar'',''varchar''))
+????and so.name not like ''dt%''
+????group by sc.name, sc.collation'
+ 
+????exec (@sql)
+
+select @counter=@counter+1
+
+end
+select 'the ' + dbname + ' database has more than one collation' as 'multiple collations in one database check'
+into #different_collations
+from #database_collations
+group by dbname
+having count(*)>1
+
+if @@rowcount=0
+begin
+ select 'there are no databases with different collations within' 
+ as 'multiple collations in one database check'
+end 
+else
+begin
+ select * from #different_collations
+end
+-- databases with column collations different from database collation
+
+select 'the ' + dc.colname + ' column collation (' + dc.collation + ') in the '+ dc.dbname + 
+ ' database does not match the database collation (' + d.collation + ')'
+as 'database v column collation check'
+into #column_collations
+from #database_collations_by_column dc, #databases d
+where dc.dbname=d.dbname
+and dc.collation<>d.collation
+
+if @@rowcount=0
+begin
+ select 'there are no databases that have columns that do not match its database collation' 
+ as 'database v column collation check'
+end 
+else
+begin
+ select * from #column_collations
+end
+
+-- tidy up
+
+drop table #databases
+drop table #column_collations
+drop table #database_collations
+drop table #different_collations
+drop table #database_collations_by_column
+go
+exec sp_common_server_problems
+go
+
+
+
+
+

@@ -1,0 +1,170 @@
+Detach & Attach Procedure
+
+ open the procedure in ssms & execute it in master database.
+
+then execute the procedure like 
+
+Exec uspDetachAttach @DbName=<Database Name>, @NewLocationPath=<new Location for database like 'D:\Data'>
+
+
+
+/*
+-->Created By- Vimal Lohani on 30-APR-2015
+-->For successful run, Your sql server service account should have permission to old location & new location
+-->Exec uspDetachAttach @DbName=<Database Name>, @NewLocationPath=<new Location for database like 'D:\Data'>
+*/
+CREATE PROCEDURE uspDetachAttach @DbName VARCHAR(200)
+ ,@NewLocationPath VARCHAR(2000)
+AS
+BEGIN
+ SET NOCOUNT ON
+
+ DECLARE @Sql VARCHAR(max)
+ DECLARE @OldLocation VARCHAR(2000)
+ DECLARE @Size FLOAT
+ DECLARE @max INT
+
+ --Getting Database & Drive information
+ SELECT ROW_NUMBER() OVER (
+   ORDER BY fs.database_id
+   ) 'RowNo'
+  ,fs.database_id
+  ,fs.size * 8.0 / 1024 size
+  ,fs.physical_name 'OldLocation'
+  ,reverse(left(reverse(fs.physical_name), charindex('\', reverse(fs.physical_name)) - 1)) 'FileName'
+ INTO #temp
+ FROM sys.databases db
+ INNER JOIN sys.master_files fs ON fs.database_id = db.database_id
+ WHERE fs.database_id NOT IN (
+   1
+   ,2
+   ,3
+   ,4
+   ) --Not considered system databases
+  AND db.NAME = @DbName
+
+ SELECT @max = max(RowNo)
+ FROM #temp
+
+ IF (
+   (
+    SELECT Count(*)
+    FROM #temp
+    ) = 0
+   )
+ BEGIN
+  PRINT 'database not exist so return'
+
+  RETURN
+ END
+ ELSE
+ BEGIN
+  SELECT @Size = Sum(Size)
+  FROM #temp
+
+  DECLARE @drive TABLE (
+   drive VARCHAR(2)
+   ,MBfree FLOAT
+   )
+
+  INSERT INTO @drive
+  EXEC master..xp_fixeddrives
+
+  --Select * from @drive
+  IF (
+    (
+     SELECT MBfree
+     FROM @drive
+     WHERE drive = SUBSTRING(@NewLocationPath, 1, 1)
+     ) < (
+     SELECT @Size
+     )
+    )
+  BEGIN
+   PRINT 'Size not available so return'
+
+   RETURN
+  END
+  ELSE
+  BEGIN
+   --Detach database files
+   SET @Sql = 'USE MASTER;
+           ALTER DATABASE ' + @DbName + '
+           SET SINGLE_USER
+           WITH ROLLBACK IMMEDIATE;
+           EXEC MASTER.dbo.sp_detach_db @dbname = N''' + @DbName + '''
+           '
+
+   EXEC (@Sql)
+
+   -- Move MDF File from Loc1 to Loc 2
+   DECLARE @file VARCHAR(2000)
+
+   EXEC master.dbo.sp_configure 'show advanced options'
+    ,1
+
+   RECONFIGURE
+
+   EXEC master.dbo.sp_configure 'xp_cmdshell'
+    ,1
+
+   RECONFIGURE
+
+   IF ((Substring(REVERSE(@NewLocationPath), 1, 1)) <> '\')
+    SET @NewLocationPath = @NewLocationPath + '\'
+   SET @NewLocationPath = @NewLocationPath + @DbName + '\'
+
+   EXEC master.dbo.xp_create_subdir @NewLocationPath
+
+   WHILE (@max > 0)
+   BEGIN
+    SELECT @file = 'move "' + Cast(OldLocation AS VARCHAR(1000))
+    FROM #temp
+    WHERE RowNo = @max
+
+    SELECT @file = @file + '" "' + @NewLocationPath + (
+      SELECT FileName
+      FROM #temp
+      WHERE RowNo = @max
+      )
+
+    SET @file = @file + '"'
+
+    PRINT @file
+
+    EXEC master.dbo.xp_cmdshell @file
+
+    SET @file = ''
+    SET @max = @max - 1
+   END
+
+   -- Re-Attached DB
+   SELECT @file = IsNull(@file, '') + '( FILENAME = N''' + @NewLocationPath + '' + FileName + ''' ),'
+   FROM #temp
+
+   SELECT @file = 'CREATE DATABASE ' + @DbName + ' ON ' + SUBSTRING(@file, 1, LEN(@file) - 1) + 'FOR ATTACH'
+
+   PRINT @file
+
+   EXEC (@file)
+
+   SET @file = 'ALTER DATABASE ' + @DbName + ' SET MULTI_USER;'
+
+   EXEC (@file)
+
+   EXEC master.dbo.sp_configure 'xp_cmdshell'
+    ,0
+
+   RECONFIGURE
+
+   EXEC master.dbo.sp_configure 'show advanced options'
+    ,0
+
+   RECONFIGURE
+  END
+ END
+
+ DROP TABLE #temp
+END
+
+

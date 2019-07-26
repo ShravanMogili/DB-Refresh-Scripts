@@ -1,0 +1,53 @@
+/***************************************************
+
+This script synchronizes SQL login SIDs between all User 
+databases and Master.  Assumes logins already exist in 
+the User databases.
+
+**************************************************/
+
+DECLARE @DBname       nvarchar(32)
+DECLARE @Username     nvarchar(32)
+DECLARE @strSQL1      nvarchar(500)
+DECLARE @strSQL2      nvarchar(500)
+DECLARE DB_cursor CURSOR FOR
+
+	SELECT name
+	FROM master.dbo.sysdatabases
+	ORDER BY name
+
+OPEN DB_cursor
+FETCH NEXT FROM DB_cursor
+INTO @DBname
+WHILE @@FETCH_STATUS = 0
+BEGIN
+	PRINT '*****************************'
+	PRINT @DBname + ' database'
+	PRINT '*****************************'
+	SET @strSQL1 = 'DECLARE User_cursor CURSOR FOR SELECT name FROM ' + @DBname + '.dbo.sysusers WHERE issqluser = 1 AND uid > 4 ORDER BY name'
+	EXEC (@strSQL1)
+
+	OPEN User_cursor
+	FETCH NEXT FROM User_cursor
+	INTO @Username
+	WHILE @@FETCH_STATUS = 0
+	BEGIN
+		SET @strSQL2 =  'USE ' + @DBname + ' EXEC sp_change_users_login ''Update_One'',' + @Username + ',' + @Username
+		PRINT @Username
+		EXEC (@strSQL2)
+		FETCH NEXT FROM User_cursor
+		INTO @Username
+	END
+	CLOSE User_cursor
+	DEALLOCATE User_cursor
+
+	FETCH NEXT FROM DB_cursor
+	INTO @DBname
+END
+
+CLOSE DB_cursor
+DEALLOCATE DB_cursor
+
+PRINT '*****************************'
+PRINT 'Logins synched. Script completed.'
+PRINT '*****************************'

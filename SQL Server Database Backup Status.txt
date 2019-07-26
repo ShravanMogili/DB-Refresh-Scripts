@@ -1,0 +1,167 @@
+SQL Server Database Backup Status
+
+Database backups are a requirement for all DBA's. Restoring a backup consists of restoring the Last Full Backup and then the subsequent transaction logs.
+
+We call this script twice a day via a Maintenance plan. It shoots out a neatly formatted HTML email to the Database Admins, listing the databases on the server and for Each Database The Last Full Backup and the subsequent Transaction Log backups.
+
+We find this extremely helpful and reassuring. Please feel free to use/review/recode/LearnFrom this script. Just give credit where credits due and ofcourse if you do make changes to the script whether to increase functionality/efficiency please do send me a copy so that I may also use/review/recode/LearnFrom your script
+
+
+(I Have just replaced the original script after stripping away all tabs. For some reason when these were present they were showing up as control characters in the published script)
+
+
+
+
+Create proc [dbo].[xcce_EmailBackupStatus]
+ @profile_name varchar(max)='SqlInfo' 
+ ,@recipients varchar(max)='default@YourEmail.com'
+ ,@subject varchar(max)='SQLSERVER Alert - INFORMATIONAL - Database Backup Status'
+ ,@FileAttachments varchar(max)=null --semicolon (;) delimited file attachment list 
+as
+begin
+ /*
+ Author : Pratap J Prabhu
+ Date : 4/23/2009
+ Description : 
+ 1.Sends an HTML formatted email to the specified recipients
+ - Has a Database Backup Status
+ BackupStatus is LastFullBackup + Tranasction Log Backups
+ - Attaches specified files 
+ 2.Call via Maintenance Plan
+ Requirements: 
+ 1. SQL Server 2005
+ 2. Working sp_send_dbmail
+ 3. Valid Email Profile
+ Usage : 
+ exec xcce_EmailBackupStatus_Test 'SqlInfo',
+ 'PratapPrabhu@yahoo.com',
+ 'Test alert',
+ null
+ */
+ declare @Tbl table 
+ (
+ DBName varchar(50)
+ ,LastFullBackupDate varchar(50)
+ ,BackupType varchar(50)
+ ,BackupFile varchar(50)
+ ,backupSize varchar(50)
+ ,BackupStartDate_dt datetime
+ ,BackupStartDate varchar(50)
+ ,BackupEndDate varchar(50)
+ ,BackupDuration varchar(50)
+ )
+ insert into @Tbl 
+ (
+ DBName 
+ ,LastFullBackupDate 
+ ,BackupType 
+ ,BackupFile 
+ ,backupSize 
+ ,BackupStartDate_dt 
+ ,BackupStartDate 
+ ,BackupEndDate 
+ ,BackupDuration 
+ )
+ select 
+ Databases.DBname
+ ,LastFullBackupDate=case when LastFullBackupDate is null or BKS_2.[name] is null 
+ then '---NEVER---' 
+ else convert(varchar(50),LastFullBackupDate,121) 
+ end
+ ,BackupType= case when BKS_2.[name] is null 
+ then '---NONE---' 
+ else
+ case BKS_2.[Type] 
+ when 'D' then 'Full Backup' 
+ when 'L' then ' - Log' 
+ else 'UNKNOWN TYPE:'+BKS_2.[Type] 
+ end 
+ end 
+ ,BackupFile =isnull(BKS_2.[Name],'---NONE---') 
+ ,backupSize =case when BKS_2.[name] is null then '' else replace(convert(varchar(50),convert(money,isnull(BKS_2.Backup_Size,0)),1),'.00','') end
+ ,BackupStartDate_dt = case when BKS_2.[name] is null then '' else BKS_2.backup_start_date end
+ ,BackupStartDate = case when BKS_2.backup_start_date is null or BKS_2.[name] is null 
+ then '---NONE---' 
+ else convert(varchar(50),BKS_2.backup_start_date,121) 
+ end 
+ ,BackupEndDate = case when BKS_2.backup_Finish_date is null or BKS_2.[name] is null 
+ then '---NONE---' 
+ else convert(varchar(50),BKS_2.backup_Finish_date,121) 
+ end 
+ ,BackupDuration = case when (BKS_2.backup_start_date is null) or (BKS_2.backup_Finish_date is null) or BKS_2.[name] is null 
+ then '---NA---' 
+ else convert(varchar(10),datediff(mi,BKS_2.backup_start_date,BKS_2.backup_Finish_date)) 
+ end 
+ from (select distinct DBName=[name] 
+ from sys.Databases 
+ where not [name] in ( ------ Add names of Databases to exclude below
+ 'tempdb'
+ ,'model'
+ ,'ReportServer'
+ ,'ReportServerTempDB'
+ ,'sgmsdb'
+ ,'sgmsdb_archive'
+ ,'rawsyslogdb'
+ ) 
+ ) Databases 
+ left join ( Select LastFullBackupDbname=database_name
+ ,LastFullBackupDate=max(backup_finish_Date) 
+ from msdb..backupset BKS_1 
+ where [Type]='D' 
+ group by database_name 
+ ) LastFullBackup 
+ on Databases.DBName=LastFullbackup.LastFullBackupDbname 
+ left join msdb..backupset BKS_2 
+ on BKS_2.[database_name]=Databases.DBName and BKS_2.[backup_finish_Date]>=LastFullBackup.LastFullBackupDate
+
+ declare @tableHTML NVARCHAR(MAX) ;
+ --select * from xcce_DatabaseBackupStatus
+ SET @tableHTML =
+ N'<style type="text/css">'+
+ N'.h1 {font-family: Arial, verdana;font-size:16px;border:0px;background-color:white;} '+
+ N'.h2 {font-family: Arial, verdana;font-size:12px;border:0px;background-color:white;} '+
+ N'body {font-family: Arial, verdana;} '+
+ N'table{font-size:8px; border-collapse:collapse;} '+
+ N'td{background-color:#F1F1F1; border:1px solid black; padding:3px;} '+
+ N'th{background-color:#99CCFF;}'+
+ N'</style>'+
+ N'<table border="0">'+
+ N'<tr><td class="h1">Database Backup Status Report</td></tr>' +
+ N'<tr><td class="h2">AS OF '+convert(varchar(50),getdate(),101) + ' '+convert(varchar(50),getdate(),108)+N'</td></tr>'+
+ N'</table>'+
+ N'<table border="1">' +
+ N'<tr> <th>DBName</th>'+
+ N'<th>Backup Type</th>' +
+ N'<th>Backup File</th>'+
+ N'<th>Backup Size(bytes)</th>'+
+ N'<th>Started</th>' +
+ N'<th>Finished</th>' +
+ N'<th>Time(mins)</th>' +
+ N'</tr>' +
+ CAST ( ( SELECT "td/@align"='left' ,td = bks.DBName, '',
+ "td/@align"='left' ,td = bks.BackupType, '',
+ "td/@align"='left' ,td = bks.BackupFile, '',
+ "td/@align"='right',td = bks.BackupSize, '',
+ "td/@align"='left' ,td = bks.BackupStartDate, '',
+ "td/@align"='left' ,td = bks.BackupEndDate, '',
+ "td/@align"='right',td = bks.BackupDuration
+ FROM @Tbl as BKS
+ ORDER BY BKS.DBname,BKS.BackupStartDate_dt
+ FOR XML PATH('tr'), TYPE 
+ ) AS NVARCHAR(MAX) ) +
+ N'</table>' ;
+
+ EXEC msdb.dbo.sp_send_dbmail 
+ @profile_name=@profile_name ,
+ @recipients =@recipients, 
+ @subject =@subject, 
+ @body = @tableHTML,
+ @file_attachments=@FileAttachments,
+ @body_format = 'HTML' ;
+end
+go
+
+
+
+
+
